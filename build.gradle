@@ -1,0 +1,387 @@
+import com.deepgrant.acars.InstallReceiver
+import com.deepgrant.acars.PrepareGitSource
+import java.security.MessageDigest
+
+plugins {
+  id 'base'
+}
+
+group = 'com.deepgrant'
+
+tasks.named('wrapper', Wrapper) {
+  gradleVersion = '9.8.1'
+  distributionType = Wrapper.DistributionType.BIN
+  distributionSha256Sum = 'dce76f55f8e251a3a1f130eb120f30b3d271de2b76c9b0729d316b5a1b6dc01f'
+}
+
+def homebrewPrefix = providers.gradleProperty('homebrewPrefix').orElse('/opt/homebrew')
+def developerDirectory = providers.environmentVariable('DEVELOPER_DIR')
+  .orElse('/Library/Developer/CommandLineTools')
+def pythonCommand = providers.gradleProperty('pythonExecutable').orElse('/usr/bin/python3')
+def nativeJobs = providers.gradleProperty('nativeJobs').map {
+  def count = Integer.parseInt(it)
+  if (count < 1) throw new GradleException('nativeJobs must be positive')
+  count
+}.orElse(Math.max(1, Runtime.runtime.availableProcessors()))
+def deploymentTarget = providers.gradleProperty('macosDeploymentTarget').orElse('15.0')
+def nativeEnvironment = providers.environmentVariable('PATH')
+  .orElse('/usr/bin:/bin:/usr/sbin:/sbin').map { path ->
+    [DEVELOPER_DIR: developerDirectory.get(),
+     PATH: "${homebrewPrefix.get()}/bin:${path}".toString(),
+     PKG_CONFIG_PATH: "${homebrewPrefix.get()}/opt/cjson/lib/pkgconfig:${homebrewPrefix.get()}/opt/libusb/lib/pkgconfig".toString()]
+  }
+def sdkPath = providers.exec {
+  environment nativeEnvironment.get()
+  commandLine '/usr/bin/xcrun', '--show-sdk-path'
+}.standardOutput.asText.map { it.trim() }
+def compilerPath = providers.exec {
+  environment nativeEnvironment.get()
+  commandLine '/usr/bin/xcrun', '--find', 'clang'
+}.standardOutput.asText.map { it.trim() }
+def compilerVersion = providers.exec {
+  environment nativeEnvironment.get()
+  commandLine compilerPath.get(), '--version'
+}.standardOutput.asText.map { it.trim() }
+def sdkVersion = providers.exec {
+  environment nativeEnvironment.get()
+  commandLine '/usr/bin/xcrun', '--show-sdk-version'
+}.standardOutput.asText.map { it.trim() }
+
+def rtlSource = layout.buildDirectory.dir('upstream/rtl-sdr')
+def acarsSource = layout.buildDirectory.dir('upstream/acarsdec')
+def rtlBuild = layout.buildDirectory.dir('native/rtl-sdr')
+def rtlUtilities = ['rtl_sdr', 'rtl_tcp', 'rtl_test', 'rtl_fm', 'rtl_eeprom', 'rtl_adsb', 'rtl_power', 'rtl_biast']
+def rtlBuildProducts = rtlUtilities.collect { name -> rtlBuild.map { it.file("src/${name}") } } +
+  [rtlBuild.map { it.file('src/librtlsdr.0.dylib') }, rtlBuild.map { it.file('src/librtlsdr.a') }]
+def acarsBuild = layout.buildDirectory.dir('native/acarsdec')
+def rtlPrefix = layout.buildDirectory.dir('native/runtime')
+def decoderBinary = acarsBuild.map { it.file('acarsdec') }
+def probeBinary = layout.buildDirectory.file('native/check-sdr')
+def stagedBundle = layout.buildDirectory.dir('receiver/acars-macos-arm64')
+def installedBundle = layout.projectDirectory.dir('outputs/acars-macos-arm64')
+def nativePatch = layout.projectDirectory.file('patches/acarsdec-macos.patch')
+def probeSource = layout.projectDirectory.file('src/native/check-sdr.c')
+def portableLauncher = layout.projectDirectory.file('Scripts/start-acars.command')
+def bundleReadme = layout.projectDirectory.file('src/dist/README.txt')
+def verificationMarker = layout.buildDirectory.file('verification/receiver.txt')
+def cmakePath = homebrewPrefix.map { "${it}/bin/cmake".toString() }
+
+tasks.register('verifyWrapper') {
+  group = 'verification'
+  description = 'Verify the Gradle 9.8.1 wrapper JAR against the official SHA-256.'
+  inputs.file layout.projectDirectory.file('gradle/wrapper/gradle-wrapper.jar')
+  doLast {
+    def jar = file('gradle/wrapper/gradle-wrapper.jar')
+    def hash = MessageDigest.getInstance('SHA-256').digest(jar.bytes).encodeHex().toString()
+    if (hash != '3b8a25775a69158b5ad2b1d17a80a88dc7b40a352a73eb27d06c612a7ce68e98') {
+      throw new GradleException('Wrapper JAR does not match the official Gradle 9.8.1 checksum.')
+    }
+  }
+}
+
+def verifyNativeToolchain = tasks.register('verifyNativeToolchain') {
+  group = 'verification'
+  description = 'Check the Apple Silicon compiler and Homebrew build dependencies.'
+  doLast {
+    if (!System.getProperty('os.name').toLowerCase().contains('mac') ||
+        !(System.getProperty('os.arch') in ['aarch64', 'arm64'])) {
+      throw new GradleException('Native receiver builds currently require an Apple Silicon Mac.')
+    }
+    ['bin/cmake', 'bin/pkg-config', 'opt/libusb/lib/libusb-1.0.0.dylib',
+      'opt/cjson/lib/libcjson.1.dylib'].each { relative ->
+      if (!new File(homebrewPrefix.get(), relative).exists()) {
+        throw new GradleException("Missing Homebrew dependency: ${relative}. See README.md.")
+      }
+    }
+    if (!file(compilerPath.get()).isFile() || !file(sdkPath.get()).isDirectory()) {
+      throw new GradleException('Apple Command Line Tools compiler or SDK is unavailable.')
+    }
+  }
+}
+
+def fetchRtlSdr = tasks.register('fetchRtlSdr', PrepareGitSource) {
+  group = 'build setup'
+  description = 'Fetch the pinned RTL-SDR driver including Blog V4 support.'
+  repositoryUrl = 'https://github.com/osmocom/rtl-sdr.git'
+  revision = providers.gradleProperty('rtlSdrRevision')
+  sourceDirectory = rtlSource
+  commandEnvironment = nativeEnvironment
+  offline = gradle.startParameter.offline
+}
+def fetchAcarsdec = tasks.register('fetchAcarsdec', PrepareGitSource) {
+  group = 'build setup'
+  description = 'Fetch pinned acarsdec sources and apply the macOS patch.'
+  repositoryUrl = 'https://github.com/f00b4r0/acarsdec.git'
+  revision = providers.gradleProperty('acarsdecRevision')
+  sourceDirectory = acarsSource
+  patchFile = nativePatch
+  commandEnvironment = nativeEnvironment
+  offline = gradle.startParameter.offline
+}
+tasks.register('fetchSources') {
+  group = 'build setup'
+  description = 'Prepare both pinned native source checkouts.'
+  dependsOn fetchRtlSdr, fetchAcarsdec
+}
+
+def nativeOptions = {
+  ["-DCMAKE_C_COMPILER=${compilerPath.get()}", "-DCMAKE_OSX_SYSROOT=${sdkPath.get()}",
+   '-DCMAKE_OSX_ARCHITECTURES=arm64', "-DCMAKE_OSX_DEPLOYMENT_TARGET=${deploymentTarget.get()}"]
+}
+def configureRtlSdr = tasks.register('configureRtlSdr', Exec) {
+  group = 'build'
+  description = 'Configure the native RTL-SDR CMake build.'
+  dependsOn verifyNativeToolchain, fetchRtlSdr
+  inputs.files(rtlSource.map { it.file('CMakeLists.txt') }, fileTree(rtlSource) { include 'cmake/**', 'src/CMakeLists.txt' })
+    .withPathSensitivity(PathSensitivity.RELATIVE)
+  inputs.properties([sdk: sdkPath, sdkVersion: sdkVersion, compiler: compilerPath,
+    compilerVersion: compilerVersion, target: deploymentTarget, prefix: homebrewPrefix])
+  outputs.files(rtlBuild.map { it.file('CMakeCache.txt') }, rtlBuild.map { it.file('Makefile') })
+  outputs.cacheIf { false }
+  doFirst {
+    environment nativeEnvironment.get()
+    commandLine([cmakePath.get(), '-S', rtlSource.get().asFile.absolutePath,
+      '-B', rtlBuild.get().asFile.absolutePath,
+      "-DCMAKE_INSTALL_PREFIX=${rtlPrefix.get().asFile}", '-DINSTALL_UDEV_RULES=OFF'] + nativeOptions())
+  }
+}
+def compileRtlSdr = tasks.register('compileRtlSdr', Exec) {
+  group = 'build'
+  description = 'Compile the RTL-SDR library and native diagnostic tools.'
+  dependsOn configureRtlSdr
+  inputs.files(fileTree(rtlSource) { exclude '.git/**' }, rtlBuild.map { it.file('CMakeCache.txt') })
+    .withPathSensitivity(PathSensitivity.RELATIVE)
+  inputs.files(homebrewPrefix.map { new File(it, 'opt/libusb/lib/libusb-1.0.0.dylib') })
+  outputs.files rtlBuildProducts
+  outputs.cacheIf { false }
+  doFirst {
+    environment nativeEnvironment.get()
+    commandLine cmakePath.get(), '--build', rtlBuild.get().asFile.absolutePath, '--parallel', nativeJobs.get().toString()
+  }
+}
+def installRtlSdr = tasks.register('installRtlSdr', Exec) {
+  group = 'build'
+  description = 'Install the native driver into the private build prefix.'
+  dependsOn compileRtlSdr
+  inputs.files(rtlBuildProducts, fileTree(rtlBuild) { include '**/cmake_install.cmake' }, rtlSource.map { it.dir('include') })
+  outputs.dir rtlPrefix
+  outputs.cacheIf { false }
+  doFirst {
+    // This prefix is a Gradle-owned cache, never the installed receiver/data.
+    // A fresh prefix also avoids CMake trying to strip an already-stripped
+    // Mach-O rpath when native installation is rerun.
+    delete rtlPrefix.get().asFile
+    environment nativeEnvironment.get()
+    commandLine cmakePath.get(), '--install', rtlBuild.get().asFile.absolutePath
+  }
+}
+def configureAcarsdec = tasks.register('configureAcarsdec', Exec) {
+  group = 'build'
+  description = 'Configure acarsdec with RTL input and JSON output.'
+  dependsOn verifyNativeToolchain, fetchAcarsdec, installRtlSdr
+  inputs.file(acarsSource.map { it.file('CMakeLists.txt') }).withPathSensitivity(PathSensitivity.RELATIVE)
+  inputs.properties([sdk: sdkPath, sdkVersion: sdkVersion, compiler: compilerPath,
+    compilerVersion: compilerVersion, target: deploymentTarget, prefix: homebrewPrefix])
+  inputs.files(rtlPrefix.map { it.file('lib/librtlsdr.0.dylib') })
+  outputs.files(acarsBuild.map { it.file('CMakeCache.txt') }, acarsBuild.map { it.file('Makefile') })
+  outputs.cacheIf { false }
+  doFirst {
+    environment nativeEnvironment.get()
+    commandLine([cmakePath.get(), '-S', acarsSource.get().asFile.absolutePath,
+      '-B', acarsBuild.get().asFile.absolutePath,
+      "-DCMAKE_PREFIX_PATH=${rtlPrefix.get().asFile};${homebrewPrefix.get()}",
+      "-DCMAKE_C_FLAGS=-I${rtlPrefix.get().asFile}/include", '-DCJSON=ON', '-DRTLSDR=ON',
+      '-DSNDFILE=OFF', '-DLIBACARS=OFF', '-DMQTT=OFF', '-DALSA=OFF', '-DAIRSPY=OFF',
+      '-DSDRPLAY=OFF', '-DSOAPYSDR=OFF'] + nativeOptions())
+  }
+}
+def compileAcarsdec = tasks.register('compileAcarsdec', Exec) {
+  group = 'build'
+  description = 'Compile the ACARS decoder.'
+  dependsOn configureAcarsdec
+  inputs.files(fileTree(acarsSource) { exclude '.git/**' }, acarsBuild.map { it.file('CMakeCache.txt') })
+    .withPathSensitivity(PathSensitivity.RELATIVE)
+  inputs.files(rtlPrefix.map { it.file('lib/librtlsdr.0.dylib') },
+    homebrewPrefix.map { new File(it, 'opt/cjson/lib/libcjson.1.dylib') })
+  outputs.file decoderBinary
+  outputs.cacheIf { false }
+  doFirst {
+    environment nativeEnvironment.get()
+    commandLine cmakePath.get(), '--build', acarsBuild.get().asFile.absolutePath, '--parallel', nativeJobs.get().toString()
+  }
+}
+def compileDeviceProbe = tasks.register('compileDeviceProbe', Exec) {
+  group = 'build'
+  description = 'Compile the read-only USB receiver enumeration helper.'
+  dependsOn verifyNativeToolchain, installRtlSdr
+  inputs.files(probeSource, rtlPrefix.map { it.dir('include') }, rtlPrefix.map { it.file('lib/librtlsdr.0.dylib') })
+  inputs.properties([sdk: sdkPath, sdkVersion: sdkVersion, compiler: compilerPath,
+    compilerVersion: compilerVersion, target: deploymentTarget])
+  outputs.file probeBinary
+  outputs.cacheIf { false }
+  doFirst {
+    environment nativeEnvironment.get()
+    commandLine compilerPath.get(), '-isysroot', sdkPath.get(), "-mmacosx-version-min=${deploymentTarget.get()}",
+      '-I', rtlPrefix.get().dir('include').asFile.absolutePath, probeSource.asFile.absolutePath,
+      '-L', rtlPrefix.get().dir('lib').asFile.absolutePath, '-lrtlsdr',
+      "-Wl,-rpath,${rtlPrefix.get().dir('lib').asFile}", '-o', probeBinary.get().asFile.absolutePath
+  }
+}
+
+def sourcesArchive = tasks.register('sourcesArchive', Tar) {
+  group = 'distribution'
+  description = 'Archive corresponding native sources and the macOS patch, excluding Git metadata.'
+  dependsOn fetchAcarsdec, fetchRtlSdr
+  from(acarsSource) { into 'acarsdec'; exclude '.git/**' }
+  from(rtlSource) { into 'rtl-sdr'; exclude '.git/**' }
+  from(probeSource)
+  from(nativePatch) { into 'patches' }
+  compression = Compression.GZIP
+  archiveFileName = 'sources.tar.gz'
+  destinationDirectory = layout.buildDirectory.dir('distribution')
+  preserveFileTimestamps = false
+  reproducibleFileOrder = true
+}
+def stageReceiver = tasks.register('stageReceiver', Exec) {
+  group = 'build'
+  description = 'Stage and sign a standalone receiver without copying live reception data.'
+  dependsOn compileAcarsdec, compileDeviceProbe, sourcesArchive
+  inputs.files(decoderBinary, probeBinary, portableLauncher, bundleReadme,
+    layout.projectDirectory.file('Scripts/stage-receiver.py'), sourcesArchive.flatMap { it.archiveFile })
+    .withPathSensitivity(PathSensitivity.RELATIVE)
+  inputs.files(rtlPrefix.map { it.file('lib/librtlsdr.0.dylib') },
+    acarsSource.map { it.file('LICENSE.md') }, rtlSource.map { it.file('COPYING') },
+    homebrewPrefix.map { new File(it, 'opt/cjson/lib/libcjson.1.dylib') },
+    homebrewPrefix.map { new File(it, 'opt/libusb/lib/libusb-1.0.0.dylib') },
+    homebrewPrefix.map { new File(it, 'opt/cjson/LICENSE') }, homebrewPrefix.map { new File(it, 'opt/libusb/COPYING') })
+  inputs.property 'developerDirectory', developerDirectory
+  outputs.dir stagedBundle
+  outputs.cacheIf { false }
+  doFirst {
+    delete stagedBundle.get().asFile
+    environment nativeEnvironment.get()
+    commandLine pythonCommand.get(), file('Scripts/stage-receiver.py').absolutePath,
+      '--decoder', decoderBinary.get().asFile.absolutePath, '--probe', probeBinary.get().asFile.absolutePath,
+      '--rtl-prefix', rtlPrefix.get().asFile.absolutePath, '--homebrew-prefix', homebrewPrefix.get(),
+      '--destination', stagedBundle.get().asFile.absolutePath,
+      '--launcher', portableLauncher.asFile.absolutePath, '--readme', bundleReadme.asFile.absolutePath,
+      '--sources-archive', sourcesArchive.get().archiveFile.get().asFile.absolutePath,
+      '--acars-source', acarsSource.get().asFile.absolutePath, '--rtl-source', rtlSource.get().asFile.absolutePath,
+      '--developer-dir', developerDirectory.get()
+  }
+}
+def verifyReceiver = tasks.register('verifyReceiver', Exec) {
+  group = 'verification'
+  description = 'Verify signatures, portable library paths and JSON support without opening the SDR.'
+  dependsOn stageReceiver
+  inputs.dir(stagedBundle).withPathSensitivity(PathSensitivity.RELATIVE)
+  inputs.file(layout.projectDirectory.file('Scripts/verify-receiver.py'))
+  inputs.property 'developerDirectory', developerDirectory
+  outputs.file verificationMarker
+  outputs.cacheIf { false }
+  doFirst {
+    environment nativeEnvironment.get()
+    commandLine pythonCommand.get(), file('Scripts/verify-receiver.py').absolutePath,
+      stagedBundle.get().asFile.absolutePath, '--developer-dir', developerDirectory.get()
+  }
+  doLast {
+    def marker = verificationMarker.get().asFile
+    marker.parentFile.mkdirs()
+    marker.text = 'Verified signatures, relative libraries, JSON output and standalone launcher.\n'
+  }
+}
+def receiverFilePaths = ['bin/acarsdec', 'bin/check-sdr', 'lib/librtlsdr.0.dylib',
+  'lib/libcjson.1.dylib', 'lib/libusb-1.0.0.dylib', 'start-acars.command', 'README.txt',
+  'sources.tar.gz', 'licenses/acarsdec.txt', 'licenses/rtl-sdr.txt', 'licenses/cjson.txt', 'licenses/libusb.txt']
+def installReceiver = tasks.register('installReceiver', InstallReceiver) {
+  group = 'build'
+  description = 'Install the verified bundle while preserving existing JSON captures.'
+  dependsOn verifyReceiver
+  sourceDirectory = stagedBundle
+  destinationDirectory = installedBundle
+  installedFiles.from(receiverFilePaths.collect { installedBundle.file(it) })
+}
+def receiverArchive = tasks.register('receiverArchive', Tar) {
+  group = 'distribution'
+  description = 'Create the standalone receiver archive; live captures are never included.'
+  dependsOn verifyReceiver
+  from(stagedBundle) { into 'acars-macos-arm64' }
+  compression = Compression.GZIP
+  archiveFileName = 'acars-macos-arm64.tar.gz'
+  destinationDirectory = layout.projectDirectory.dir('outputs')
+  preserveFileTimestamps = false
+  reproducibleFileOrder = true
+}
+tasks.register('buildReceiver') {
+  group = 'build'
+  description = 'Build, verify, install and archive the Apple Silicon receiver.'
+  dependsOn installReceiver, receiverArchive
+}
+tasks.named('assemble') { dependsOn tasks.named('buildReceiver') }
+
+def gain = providers.gradleProperty('gain').orElse(providers.environmentVariable('ACARS_GAIN')).orElse('49.6')
+def ppm = providers.gradleProperty('ppm').orElse(providers.environmentVariable('ACARS_PPM')).orElse('0')
+def device = providers.gradleProperty('device').orElse(providers.environmentVariable('SDR_DEVICE'))
+def station = providers.gradleProperty('station').orElse(providers.environmentVariable('ACARS_STATION')).orElse('MA-ACARS')
+def frequencies = providers.gradleProperty('frequencies').orElse(
+  '130.025,130.450,130.825,130.850,131.125,131.525,131.550,131.725,131.825,131.850'
+).map { text ->
+  def values = text.trim().split(/[\s,]+/).findAll { it }
+  if (!values || values.any { !it.isBigDecimal() || new BigDecimal(it) <= 0 }) {
+    throw new GradleException('frequencies must be comma- or space-separated positive MHz values')
+  }
+  values as List
+}
+tasks.register('checkSdr', Exec) {
+  group = 'application'
+  description = 'Enumerate attached SDRs without opening or retuning them.'
+  dependsOn installReceiver
+  doFirst { commandLine installedBundle.file('bin/check-sdr').asFile.absolutePath }
+}
+tasks.register('receive', Exec) {
+  group = 'application'
+  description = 'Receive ACARS continuously and write daily JSON logs; stop with Control-C.'
+  dependsOn installReceiver
+  standardInput = System.in
+  doFirst {
+    environment 'ACARS_GAIN', gain.get()
+    environment 'ACARS_PPM', ppm.get()
+    environment 'ACARS_STATION', station.get()
+    if (device.isPresent()) environment 'SDR_DEVICE', device.get()
+    commandLine([installedBundle.file('start-acars.command').asFile.absolutePath] + frequencies.get())
+  }
+}
+tasks.register('run') {
+  group = 'application'
+  description = 'Alias for receive.'
+  dependsOn tasks.named('receive')
+}
+def captureSeconds = providers.gradleProperty('captureSeconds').orElse('120')
+def captureName = providers.gradleProperty('captureName').orElse('acars-capture')
+tasks.register('capture', Exec) {
+  group = 'application'
+  description = 'Run a bounded live capture, stop its decoder gracefully and summarize the JSON.'
+  dependsOn installReceiver
+  standardInput = System.in
+  doFirst {
+    environment nativeEnvironment.get()
+    def arguments = [pythonCommand.get(), file('Scripts/capture-acars.py').absolutePath,
+      '--decoder', installedBundle.file('bin/acarsdec').asFile.absolutePath,
+      '--probe', installedBundle.file('bin/check-sdr').asFile.absolutePath,
+      '--data-dir', installedBundle.dir('data').asFile.absolutePath,
+      '--ppm', ppm.get(), '--gain', gain.get(), '--station', station.get(),
+      '--seconds', captureSeconds.get(), '--name', captureName.get()]
+    if (device.isPresent()) arguments.addAll(['--device', device.get()])
+    commandLine(arguments + frequencies.get())
+  }
+}
+tasks.register('test', Exec) {
+  group = 'verification'
+  description = 'Test capture shutdown, decoder failures and receiver selection using simulated devices.'
+  workingDir layout.projectDirectory
+  doFirst {
+    environment nativeEnvironment.get()
+    commandLine pythonCommand.get(), '-m', 'unittest', 'discover', '-s', 'Tests', '-v'
+  }
+}
+tasks.named('check') { dependsOn verifyReceiver, tasks.named('verifyWrapper'), tasks.named('test') }

@@ -91,3 +91,34 @@ and Mac Studio M1 Max execution host were verified after the move.
 The source, settings, and 195 received JSON messages were preserved. A fresh
 build from this folder passed, and the packaged library paths and signatures
 were verified. The old chat-workspace launcher delegates to this project.
+
+## Gradle migration
+
+The project now follows the pidex Groovy Gradle task structure. Gradle and
+the generated wrapper are pinned to 9.8.1, with official distribution and
+wrapper JAR checksums. Native configuration, compilation, driver installation,
+staging, signature verification, bundle installation and archives are distinct
+tasks. Pinned source revisions remain unchanged.
+
+Use ./gradlew build for the full software workflow, ./gradlew receive for
+continuous reception, ./gradlew capture for a bounded test, and ./gradlew
+checkSdr for enumeration. Hardware tasks are not dependencies of build/check.
+Small platform helpers handle Mach-O relocation/signing, verification and
+graceful bounded process shutdown. Legacy shell entry points delegate to Gradle.
+
+Native sources and caches are now Gradle-owned under build/. Source and receiver
+archives exclude Git metadata and live logs. Bundle installation replaces only
+the declared program files atomically; existing data and active file handles
+are preserved. The portable bundle retains a Java-independent launcher.
+
+Verification passed for a fresh native build, a clean/rebuild cycle, and an
+offline incremental build. Unchanged native compilation, staging, verification
+and installation tasks were skipped. All five simulated capture lifecycle
+tests passed. The official Gradle 9.8.1 wrapper checksum matched, and the wrapper
+also launched successfully on the Mac's installed Java 26 runtime.
+
+All seven existing capture files retained their original bytes, allowing new
+messages to append. A held executable file descriptor retained its bytes across
+atomic installation. The running user receiver process remained alive; no live
+hardware capture was started by the software verification tasks. The receiver
+archive was checked to contain no JSON reception logs.
