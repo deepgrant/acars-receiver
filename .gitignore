@@ -1,0 +1,12 @@
+.DS_Store
+/outputs/
+/work/acars-macos/acarsdec/
+/work/acars-macos/rtl-sdr/
+/work/acars-macos/runtime/
+/work/acars-macos/*build/
+/work/acars-macos/build-macos/
+/work/acars-macos/check-sdr
+*.log
+*.csv
+*.jsonl
+__pycache__/

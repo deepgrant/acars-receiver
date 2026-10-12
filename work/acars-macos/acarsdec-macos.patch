@@ -1,0 +1,36 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index cb15801..c793cc5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,14 +1,14 @@
+ cmake_minimum_required (VERSION 3.12)
+ project (acarsdec C)
+ 
+-add_compile_options(-Ofast)
++add_compile_options(-O3 -ffast-math)
+ 
+ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
+ 
+ include(CMakeDependentOption)
+ 
+ add_executable(acarsdec acars.c  acarsdec.c  label.c  msk.c  output.c netout.c fileout.c lib.c statsd.c)
+-execute_process(COMMAND git describe --tags --always --dirty OUTPUT_VARIABLE VERSION OUTPUT_STRIP_TRAILING_WHITESPACE)
++execute_process(COMMAND git describe --tags --always --dirty WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} OUTPUT_VARIABLE VERSION OUTPUT_STRIP_TRAILING_WHITESPACE)
+ if(VERSION)
+ add_compile_definitions(VERSION="${VERSION}")
+ endif()
+diff --git a/acarsdec.c b/acarsdec.c
+index c19d871..9bf1a29 100644
+--- a/acarsdec.c
++++ b/acarsdec.c
+@@ -27,6 +27,10 @@
+ #include <unistd.h>
+ #include <limits.h>
+ #include <err.h>
++#ifndef HOST_NAME_MAX
++/* Darwin does not expose HOST_NAME_MAX in <limits.h>. */
++#define HOST_NAME_MAX 255
++#endif
+ #ifdef HAVE_LIBACARS
+ #include <libacars/version.h>
+ #endif
