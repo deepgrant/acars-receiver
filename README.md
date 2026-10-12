@@ -113,6 +113,8 @@ changes to the Mac's global Xcode selection.
 - `build/`: Gradle-owned checkouts, CMake outputs and staging; ignored by Git.
 - `outputs/acars-macos-arm64/data/`: preserved live JSON; ignored by Git.
 - `docs/setup-history.md`: hardware calibration and reception history.
+- [ACARS message interpretation and UI design reference](docs/acars-message-interpretation-and-ui-design.md):
+  JSON fields, examples from the October 12 log, and proposed UI considerations.
 
 V4 live reception was verified on October 12, 2026: four messages from N584QS
 on 131.725 MHz, all with zero reported parity errors, including airport-status

@@ -22,6 +22,9 @@ An existing continuous receiver was observed during the Gradle migration;
 check current process ownership before running hardware tasks.
 
 Keep raw reception logs in outputs/acars-macos-arm64/data and out of Git.
+The fixed snapshot docs/acars_20261012.reference.jsonl is an explicit exception:
+the user requested that it be versioned alongside the design document for
+offline design and testing. Preserve its bytes and line order.
 These are live received messages; recorded-test-example.jsonl is replay data.
 Preserve the original frames when adding interpretation or reassembly.
 Do not assign units to proprietary numeric payloads without a matching layout.

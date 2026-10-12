@@ -14,4 +14,6 @@
 *.log
 *.csv
 *.jsonl
+# Fixed reference data for the ACARS design document and offline tests.
+!/docs/acars_20261012.reference.jsonl
 __pycache__/
