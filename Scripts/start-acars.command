@@ -20,7 +20,7 @@ printf '%s\n' 'Listening for ACARS. Messages will appear below; stop with Contro
 printf 'Receiver settings: gain %s dB, correction %s ppm\n' "${ACARS_GAIN:-49.6}" "${ACARS_PPM:-0}"
 printf 'JSON data: %s\n' "$acars_dir/data/acars.jsonl (daily rotation enabled)"
 exec "$acars_dir/bin/acarsdec" \
-    -i MA-ACARS \
+    -i "${ACARS_STATION:-MA-ACARS}" \
     --rtlsdr "${SDR_DEVICE:-0}" \
     -g "${ACARS_GAIN:-49.6}" -p "${ACARS_PPM:-0}" \
     --output full:file \

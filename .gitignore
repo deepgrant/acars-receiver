@@ -1,4 +1,9 @@
 .DS_Store
+/.gradle/
+/.gradle-user-home/
+/build/
+/buildSrc/.gradle/
+/buildSrc/build/
 /outputs/
 /work/acars-macos/acarsdec/
 /work/acars-macos/rtl-sdr/
