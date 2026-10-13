@@ -115,6 +115,8 @@ changes to the Mac's global Xcode selection.
 - `docs/setup-history.md`: hardware calibration and reception history.
 - [ACARS message interpretation and UI design reference](docs/acars-message-interpretation-and-ui-design.md):
   JSON fields, examples from the October 12 log, and proposed UI considerations.
+- [ACARS UI visual references](docs/acars-ui-reference.md): locally saved cockpit
+  photographs and ideas for message views, status, and flight summaries.
 
 V4 live reception was verified on October 12, 2026: four messages from N584QS
 on 131.725 MHz, all with zero reported parity errors, including airport-status

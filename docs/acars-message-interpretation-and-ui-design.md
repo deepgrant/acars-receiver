@@ -5,6 +5,9 @@ and identifies information that could be useful in a future receiver UI.
 The UI, storage model, and Pi 4 deployment have not yet been specified.
 The UI ideas below are proposals, not implemented features.
 
+See [ACARS UI visual references](acars-ui-reference.md) for locally saved
+cockpit photographs and related presentation ideas.
+
 ## Evidence and scope
 
 The fixed reference data is [acars_20261012.reference.jsonl](acars_20261012.reference.jsonl),
